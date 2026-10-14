@@ -1,0 +1,178 @@
+\documentclass[11pt,a4paper]{article}
+\usepackage[margin=2cm]{geometry}
+\usepackage{amsmath,amssymb,mathtools}
+\usepackage{booktabs,longtable,float,graphicx,enumitem}
+\usepackage[table]{xcolor}
+\usepackage{tikz}
+\usetikzlibrary{arrows.meta,positioning}
+\usepackage{listings}
+\usepackage{microtype}
+\usepackage[hidelinks]{hyperref}
+\lstset{basicstyle=\ttfamily\scriptsize,breaklines=true,columns=fullflexible,frame=single,keepspaces=true}
+\setlength{\parindent}{0pt}
+\setlength{\parskip}{4pt}
+
+% ---- edit before submitting -------------------------------------------------
+\newcommand{\studentname}{Erik Mirzoyan}  % fill in
+\newcommand{\studentid}{\rule{3.5cm}{0.4pt}}     % fill in
+\newcommand{\repourl}{https://github.com/10mirzoyan71/photonicsai-hw2}
+\newcommand{\videonote}{\texttt{hw2\_agentic\_hardware/video/task2\_agent\_run.mp4} in the repository (the run reported below)}
+% -----------------------------------------------------------------------------
+\newcommand{\todobox}[1]{\begin{center}\fcolorbox{red}{red!5}{\begin{minipage}{0.92\linewidth}#1\end{minipage}}\end{center}}
+
+\input{hw2_bench_validation.tex}
+
+\begin{document}
+\begin{center}
+{\Large\bfseries PhotonicsAI --- AI-Driven Science and Autonomous Laboratories}\\[3pt]
+{\large Homework 2: Agentic Systems with Hardware}\\[6pt]
+Name: \studentname \qquad Due 12.10.2026\\[2pt]
+Code: \url{\repourl}, folder \texttt{hw2\_agentic\_hardware/} (the Homework 1 repository, with this work added)
+\end{center}
+
+%======================================================================
+\section*{Task 1. Human-in-the-loop}
+%======================================================================
+\textbf{Code:} \texttt{hw2\_agentic\_hardware/agent\_v2.py} (graph), \texttt{run\_task1.py} (runs a thread, pauses for the
+person), \texttt{render\_hw2.py}, \texttt{tests/offline\_tests.py}. It starts from Homework 1, Task 6: the same four roles,
+the same shared dialogue as the state of a LangGraph \texttt{StateGraph}, the same role prompts, the same coding tool given
+only to the executor, the same 8-decision budget, and the orchestrator's choice is still a model call with structured output.
+All runs in this report used \texttt{--model claude-cli:claude-sonnet-5-5}: the model is called through the Claude Code CLI
+in print mode (\texttt{task6\_agentic\_system/claude\_cli.py}) with the CLI's own tools switched off; decisions are its
+structured output, and the executor's tools (coding, focusing) are requested as structured output and run by the executor node.
+
+\begin{center}
+\begin{tikzpicture}[>=Stealth,
+  box/.style={draw,thick,rounded corners,minimum width=24mm,minimum height=9mm,align=center,font=\small}]
+  \node[box,fill=blue!8] (o) at (0,0) {orchestrator\\\scriptsize decision = model call};
+  \node[box] (s) at (-5,0) {START\\\scriptsize user request};
+  \node[box] (e) at (4.6,0) {END};
+  \node[box,fill=green!8] (sc) at (-5,-2.8) {scientist};
+  \node[box,fill=green!8] (g) at (-2,-2.8) {general};
+  \node[box,fill=orange!12] (ex) at (1.2,-2.8) {executor\\\scriptsize coding tool};
+  \node[box,fill=red!10] (h) at (6.0,-2.8) {human\\\scriptsize \texttt{interrupt()}};
+  \draw[->,thick] (s) -- (o);
+  \draw[->,thick] (o) -- node[above,font=\scriptsize]{finish} (e);
+  \draw[->,thick] (o.200) to[bend right=10] (sc.north);  \draw[->,thick] (sc.north east) to[bend right=10] (o.205);
+  \draw[->,thick] (o.235) -- (g.80);  \draw[->,thick] (g.60) -- (o.245);
+  \draw[->,thick] (o.290) -- (ex.105);  \draw[->,thick] (ex.75) -- (o.305);
+  \draw[->,thick,red!70!black] (o.330) to[bend left=10] node[above right,font=\scriptsize,pos=0.55]{ask (ambiguous / hard)} (h.north);
+  \draw[->,thick,red!70!black] (h.north west) to[bend left=10] (o.320);
+  \draw[->,thick,red!70!black] (h.west) -- node[below,font=\scriptsize]{accepted step} (ex.east);
+\end{tikzpicture}\\[2pt]
+{\small Red: the orchestrator asks the person; the reply goes back to the orchestrator (ambiguous query, or refused step) or runs the accepted step.}
+\end{center}
+
+\paragraph{When the graph stops.} The orchestrator's structured output is now
+\texttt{Decision(next\_role, instruction, question, reason, stop\_kind, pending\_role, pending\_instruction)} with
+\texttt{next\_role} $\in\{$scientist, general, executor, \textbf{human}, finish$\}$. Its prompt defines the two situations
+and nothing else decides them: an \emph{ambiguous query} (the latest request has more than one reading, and the readings would
+send the work to different roles or change the reported number; the question lists the readings), and a \emph{hard decision}
+(the next step would run the coding tool, overwrite a result already on disk, or end the dialogue and report a measurement;
+the step goes into \texttt{pending\_role}/\texttt{pending\_instruction} and the question states it). To judge overwrites, the
+status line the orchestrator reads lists the files already in the working directory. There is no keyword list and no rule
+that stops on a fixed role: whether to stop is decided by the model from the dialogue.
+
+\paragraph{How the stop works.} The graph is compiled with a checkpointer, \texttt{SqliteSaver}, whose file is
+\texttt{runs/checkpoints.sqlite}, and every run is a thread: \texttt{config = \{"configurable": \{"thread\_id": <id>\}\}}.
+The \texttt{human} node calls \texttt{langgraph.types.interrupt(payload)} with the question (and the proposed step); the run
+returns with the pending interrupt and the thread stays paused at that node. \texttt{run\_task1.py} prints the question and
+reads the reply; \texttt{graph.invoke(Command(resume=reply), config)} resumes the same thread (also from a new process:
+\texttt{--thread <id> --reply "..."}). The reply is appended as a turn with role \texttt{human}; then
+\begin{itemize}[leftmargin=*,itemsep=1pt]
+\item ambiguous: the turn goes back to the orchestrator, whose next decision reads the reply and follows that reading;
+\item hard decision, accepted (the reply starts with an explicit yes / ok / proceed / accept): the human node routes straight to
+the executor with the pending instruction, or, for a pending finish, the orchestrator writes the approved final report and the
+graph ends;
+\item hard decision, refused (anything else): the turn goes back to the orchestrator and the step does not run. The orchestrator's
+next turn starts with a record computed in code, ``the proposed step (\dots) was REFUSED by the human and did NOT run. Tool calls
+in this run: $n$ when it was proposed, $n$ now.''
+\end{itemize}
+The Homework 1 rule stays: finishing (directly or as a pending step) needs an executor turn with a VERIFIED measurement.
+
+\subsection*{Run (a): an ambiguous request about the Silverbox work}
+\input{hw2_task1_a.tex}
+\subsection*{Run (b): a hard decision, refused once, then accepted}
+\input{hw2_task1_b.tex}
+
+%======================================================================
+\section*{Task 2. Focusing through a simulated bench}
+%======================================================================
+\textbf{Code:} \texttt{hw2\_agentic\_hardware/bench.py} (bench, search, tool), \texttt{agent\_v2.py} (the executor receives the
+tool), \texttt{run\_task2.py}, \texttt{validate\_bench.py}. Screen recording: \videonote.
+
+\subsection*{The simulated bench}
+The imaging part of the path, laser $\to$ DMD $\to$ scattering medium $\to$ camera, is
+\[
+I_\text{cam}=\mathcal N\!\left(\kappa\,\big|T E_\text{in}\big|^2\right),\qquad (E_\text{in})_j=a_j\,s_j,\quad s_j\in\{0,1\},
+\]
+\begin{itemize}[leftmargin=*,itemsep=1pt]
+\item DMD: $64\times64$ mirrors, binary amplitude $s_j$; the expanded beam illuminates it with a Gaussian amplitude $a_j$ (waist
+0.8 of the half side). A macropixel of $m\times m$ mirrors switches together, so $N=(64/m)^2$ segments.
+\item $T$ ($4096$ camera pixels $\times$ $4096$ mirrors): each column, the field one mirror makes on the camera, is an independent
+fully developed speckle field (circular Gaussian noise low-passed by a circular pupil). Measured on a random pattern: contrast
+\specklecontrast, speckle grain \specklegrain\,px (FWHM of the intensity autocorrelation).
+\item Camera $\mathcal N$: Poisson shot noise (mean signal 400\,e$^-$/px for a random half-on pattern), 5\,e$^-$ read noise, 1\%
+laser intensity noise per shot, full-well clipping. Two shots of the same pattern differ by \shotnoise\% rms per pixel.
+\end{itemize}
+
+\subsection*{The search and the tool}
+\texttt{focusing\_tool(macropixel, focus\_size, bg\_inner, bg\_outer, bg\_regions, iterations, flips, flips\_final, remeasure,
+final\_shots)} follows the algorithm of the task: random start; after every shot the mean intensity in the focus square and in
+\texttt{bg\_regions} angular sectors of the ring $r_\text{in}<r\le r_\text{out}$ around it is read;
+\[
+\eta=\frac{\langle I\rangle_\text{focus}}{\frac1K\sum_{k=1}^{K}\langle I\rangle_{\text{region }k}};
+\]
+each iteration flips \texttt{flips} random macropixels (annealed to \texttt{flips\_final}) and keeps the flip if $\eta$ rose
+(with \texttt{remeasure} the current pattern is re-shot every iteration so a lucky noisy reading cannot lock in). It returns
+$\eta$ (mean $\pm$ std over fresh final shots), $\eta_\text{far}$ (the focus against the camera outside the ring, which the search
+never sees), the progress trace, and the images (random-start camera, final camera with the regions drawn, DMD pattern, trace).
+The executor is the only role that receives it; with it the system runs without the human stop, so after ``focus the beam'' it
+chooses every setting itself.
+
+\subsection*{Bench validation (run directly, not by the agent)}
+\begin{center}\small\validationtable\end{center}
+$\eta$ is the task's metric, $\eta_\text{far}$ the focus against the rest of the camera, ``known-$T$'' the best binary pattern
+built from the transmission matrix (segments in phase with the focus, threshold scanned), and $N_\text{eff}/2\pi$ the
+binary-amplitude theory for a Gaussian-illuminated DMD ($N_\text{eff}=(\sum A_k^2)^2/\sum A_k^4$).
+\begin{figure}[H]\centering
+\includegraphics[width=0.62\linewidth]{../hw2_agentic_hardware/figures/validation_vs_N.png}
+\caption{Enhancement against the number of segments on the simulated bench.}
+\end{figure}
+
+\paragraph{The proximal background can be gamed.} The ratio $\eta$ rises if the focus brightens \emph{or} the ring darkens, and
+with many segments the search does both. With 256 segments:
+\begin{center}\small\ringtable\end{center}
+A narrow ring ($r=6$--$14$\,px) gives a proximal $\eta$ more than twice $\eta_\text{far}$; a wide ring keeps the two close. At
+1024 and 4096 segments even the wide ring is partly darkened ($\eta=96.6$ vs $\eta_\text{far}=61.3$; $287$ vs $107$), and the
+far-field value stays below the known-$T$ pattern, i.e.\ 20\,000 iterations do not converge there. A focus square larger than
+the speckle grain lowers $\eta$ (averaging over a bright centre and darker edges). This is why the tool reports both numbers.
+
+\input{hw2_task2_run.tex}
+
+\subsection*{Comparison with the focusing result from the lecture}
+\newcommand{\lecturebest}{33}
+The best enhancement in the lecture's experiment was about $\lecturebest$. The focus the agent kept on the simulated bench
+($\agentsegments$ segments) scores $\eta=\agenteta$ with the task's proximal-background metric, above the lecture's value, and
+$\eta_\text{far}=\agentetafar$ against the rest of the camera, below it. The two numbers bracket the lecture's result because the
+agent's narrow ring (\agentring\,px) let the search darken the background it is measured against (see the bench validation).
+With a wide ring the same $\agentsegments$ segments give $\eta=28.5$ and $\eta_\text{far}=30.7$ (bench validation table),
+close to the lecture's $\lecturebest$, and 1024 segments give $\eta_\text{far}=61.3$, almost twice it. So, on the measure that
+cannot be raised by darkening the ring, the simulated bench with $\agentsegments$ segments is at the level of the lecture's
+experiment and needs more segments to exceed it; a real bench also loses enhancement to drift and mechanical instability,
+which the simulation does not have.
+
+\paragraph{Published experiments and theory.}
+For binary amplitude modulation the expected optimum is $\eta\approx N/2\pi$ (about $0.16N$), lower than phase-only shaping
+($\eta\approx\pi N/4$) by a factor $\pi^2/2$. Akbulut et al.\ (Opt.\ Express 19, 4017, 2011) obtained $75\pm6$ with 812 segments
+(theory $129$, i.e.\ $58\%$ of it); Zhang et al.\ report 152 with 1536 segments on a DMD with a genetic algorithm (9.9\% of $N$).
+On the simulated bench the search reaches, against the far field, $9.7$ with 64 segments, $30.7$ with 256 and $61.3$ with 1024
+(15\%, 12\% and 6.0\% of $N$; the Gaussian illumination gives $N_\text{eff}\approx N/2$), the same order as the experiments.
+The focus the agent kept ($\agentsegments$ segments, ring \agentring\,px) has $\eta=\agenteta$ and
+$\eta_\text{far}=\agentetafar$ (\agentfarpct\% of $N$): against the far field it is in the same range as the experiments,
+while its proximal $\eta$ is more than twice $\eta_\text{far}$ because the agent chose a narrow ring, the effect shown in the
+bench validation above.
+Differences to keep in mind: the bench has no drift, no mechanical instability and a perfectly static medium, which favours the
+simulation, while the noise and the finite iteration budget limit it at large $N$; and the task's proximal-background metric can
+read higher than the usual definition (focus over the average speckle), as shown above.
+\end{document}
